@@ -51,6 +51,10 @@ func OpenBookingsDB() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := EnsureAuditSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return db, nil
 }

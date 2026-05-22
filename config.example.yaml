@@ -1,0 +1,49 @@
+# Default is safe: this will never create a booking.
+dry_run: true
+
+# The automation is intentionally locked to Australia/Sydney.
+timezone: Australia/Sydney
+
+venue:
+  # Find this with:
+  #   padel clubs --near "Alexandria NSW" --json
+  # Then confirm the tenant name exactly before switching dry_run to false.
+  id: "PLAYTOMIC_TENANT_ID_FOR_INDOOR_PADEL_AUSTRALIA_ALEXANDRIA"
+  name_exact: "Indoor Padel Australia Alexandria"
+
+release:
+  days_in_advance: 14
+  time: "18:30"
+  retry_until: "18:35"
+
+booking:
+  allowed_weekdays: [Monday, Tuesday, Wednesday, Thursday]
+  duration_minutes: 90
+  start_window:
+    from: "18:30"
+    to: "20:00"
+  max_bookings_per_week: 2
+  max_bookings_per_day: 1
+  players: 4
+
+payment:
+  # MERCHANT_WALLET is the Playtomic wallet method observed by this CLI.
+  # If your account exposes a saved card/direct method instead, set the exact
+  # method code only after independently confirming it is non-interactive.
+  method: "MERCHANT_WALLET"
+
+calendar:
+  # Optional private iCalendar feed URL. Leave empty to disable conflict checks.
+  ical_url: ""
+
+notifications:
+  telegram:
+    enabled: false
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+  whatsapp:
+    enabled: false
+
+polling:
+  min_interval_seconds: 15
+  max_interval_seconds: 30
