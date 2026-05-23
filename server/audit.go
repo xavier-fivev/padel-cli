@@ -85,7 +85,10 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 			ev.Metadata = prettyJSON(metaJSON.String)
 		}
 		if t, err := time.Parse(time.RFC3339, eventTime); err == nil {
-			ev.Time = t
+			// Show audit times in the dashboard's display zone (set via TZ env,
+			// defaults to Australia/Sydney in docker-compose). Without this
+			// conversion, time.Parse returns UTC even when TZ is set globally.
+			ev.Time = t.In(time.Local)
 		}
 		key := ev.RunID
 		if key == "" {

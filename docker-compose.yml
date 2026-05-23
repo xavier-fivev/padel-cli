@@ -15,6 +15,9 @@ services:
     volumes:
       - ${PADEL_CONFIG_DIR:-${HOME}/.config/padel}:/home/padel/.config/padel
     environment:
+      # Display timezone for the dashboard. Defaults to Sydney since that's
+      # the only venue auto-book targets; override if you move the bot.
+      TZ: ${PADEL_TZ:-Australia/Sydney}
       # Optional Telegram credentials forwarded from host env, if set there.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
