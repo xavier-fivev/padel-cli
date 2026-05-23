@@ -60,9 +60,13 @@ func runAutoBook(ctx context.Context, cfg AutoBookConfig, opts autoBookRunOption
 	if opts.Sleep == nil {
 		opts.Sleep = time.Sleep
 	}
-	if opts.IgnoreReleaseWindow && !cfg.DryRun {
-		return fmt.Errorf("--ignore-release-window is only allowed when dry_run is true")
-	}
+	// --ignore-release-window is now allowed even when dry_run is false. The
+	// release window is the autonomous schedule signal — when the bot fires
+	// itself at 18:30 Sydney it must respect it. But a manual operator who
+	// passes the flag is opportunistically searching for slots that came back
+	// onto the market via cancellations between release windows. All other
+	// safety guards (72h lead time, caps, venue verify, payment-challenge
+	// abort, forbidden-publish test) still apply.
 
 	loc, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
@@ -101,13 +105,14 @@ func runAutoBook(ctx context.Context, cfg AutoBookConfig, opts autoBookRunOption
 		return nil
 	}
 
-	if !opts.IgnoreReleaseWindow && !withinReleaseWindow(now, cfg, loc) {
-		message := fmt.Sprintf("outside release window: now %s, allowed %s-%s %s", now.Format("15:04:05"), cfg.Release.Time, cfg.Release.RetryUntil, cfg.Timezone)
-		audit.log("info", "skipped_release_window", message, "", nil)
-		return nil
-	}
-	if opts.IgnoreReleaseWindow {
-		audit.log("info", "dry_run_release_window_bypass", "ignoring release window for dry-run testing", "", nil)
+	if !opts.IgnoreReleaseWindow {
+		nowAfter, decision := waitForReleaseWindow(now, cfg, loc, opts.Sleep, opts.Now, audit)
+		now = nowAfter
+		if decision == waitDecisionSkip {
+			return nil
+		}
+	} else {
+		audit.log("info", "release_window_bypass", "manual run — searching for any available slot regardless of release window", "", nil)
 	}
 
 	creds, err := loadAutoBookCredentials(ctx)
@@ -274,6 +279,44 @@ func releaseWindowEnd(now time.Time, cfg AutoBookConfig, loc *time.Location) tim
 	minutes, _ := parseClock(cfg.Release.RetryUntil)
 	local := now.In(loc)
 	return time.Date(local.Year(), local.Month(), local.Day(), minutes/60, minutes%60, 0, 0, loc)
+}
+
+type waitDecision int
+
+const (
+	waitDecisionProceed waitDecision = iota
+	waitDecisionSkip
+)
+
+// preWindowMaxAttempts caps how long we'll poll waiting for the release
+// window to open. At 10s per attempt this is ~10 minutes — comfortably
+// longer than any reasonable scheduler lag, but bounded so a misconfigured
+// run can't loop forever.
+const preWindowMaxAttempts = 60
+
+func waitForReleaseWindow(now time.Time, cfg AutoBookConfig, loc *time.Location, sleep func(time.Duration), nowFn func() time.Time, audit autoBookAudit) (time.Time, waitDecision) {
+	windowStart := releaseWindowStart(now, cfg, loc)
+	windowEnd := releaseWindowEnd(now, cfg, loc)
+
+	if now.After(windowEnd) {
+		audit.log("info", "skipped_release_window", fmt.Sprintf("now %s is after window end %s %s", now.Format("15:04:05"), cfg.Release.RetryUntil, cfg.Timezone), "", nil)
+		return now, waitDecisionSkip
+	}
+
+	attempts := 0
+	for now.Before(windowStart) && attempts < preWindowMaxAttempts {
+		audit.log("info", "waiting_for_release_window", fmt.Sprintf("now %s, window opens %s — sleeping 10s", now.Format("15:04:05"), windowStart.Format("15:04:05")), "", map[string]any{
+			"attempt": attempts + 1,
+		})
+		sleep(10 * time.Second)
+		now = nowFn().In(loc)
+		attempts++
+	}
+	if now.Before(windowStart) {
+		audit.log("info", "pre_window_wait_exceeded", fmt.Sprintf("window did not open within %d attempts; giving up", preWindowMaxAttempts), "", nil)
+		return now, waitDecisionSkip
+	}
+	return now, waitDecisionProceed
 }
 
 func loadAutoBookCredentials(ctx context.Context) (*storage.Credentials, error) {

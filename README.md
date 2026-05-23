@@ -154,6 +154,13 @@ Each command retries inside 18:30–18:35 with conservative 15–30 second polli
 
 Every decision is written to `~/.config/padel/bookings.db` in the `auto_book_audit` table; confirmed bookings land in the `bookings` table with `source: auto_booked`. The `booking_confirmed` audit event includes `cancel_deadline_local` and `cancel_deadline_utc` so you can sort by what needs your attention soonest.
 
+### Release-window behaviour
+
+The auto-book contract has two modes:
+
+- **Scheduled (no `--ignore-release-window`)**: the binary polls every 10s waiting for the configured release window to open (default 18:30 Sydney), then enters the normal booking flow. After the window closes (default 18:35), it skips. This means the routine cron can be set a couple of minutes early without missing the window — the binary waits.
+- **Manual (`--ignore-release-window`)**: the binary searches for any eligible slot regardless of time. Useful for opportunistic booking when slots come back onto the market via cancellations between release windows. All other safety guards (72h lead time, caps, venue verify, payment-challenge abort) still apply.
+
 ### Safety behaviour
 
 - Refuses config that widens venue, timezone, release timing, profile weekdays, profile start window, allowed durations, or booking caps.

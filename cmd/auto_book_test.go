@@ -397,6 +397,67 @@ func TestFilterAutoBookCandidatesEnforces72HourLeadTime(t *testing.T) {
 	}
 }
 
+func TestWaitForReleaseWindow_BeforeWindow_PollsUntilOpen(t *testing.T) {
+	cfg := defaultAutoBookConfig()
+	loc := mustLocation(t, autoBookTimezone)
+	// 18:27 Sydney: before the window opens (18:30).
+	clock := time.Date(2026, 6, 1, 18, 27, 0, 0, loc)
+
+	sleepCalls := 0
+	sleep := func(d time.Duration) {
+		sleepCalls++
+		// Each sleep advances our fake clock by 10 seconds.
+		clock = clock.Add(d)
+	}
+	nowFn := func() time.Time { return clock }
+
+	audit := autoBookAudit{} // no db; log only goes to stdout
+	gotNow, decision := waitForReleaseWindow(clock, cfg, loc, sleep, nowFn, audit)
+
+	if decision != waitDecisionProceed {
+		t.Fatalf("decision = %v, want waitDecisionProceed", decision)
+	}
+	if gotNow.Before(time.Date(2026, 6, 1, 18, 30, 0, 0, loc)) {
+		t.Fatalf("did not advance to window open; now = %s", gotNow.Format("15:04:05"))
+	}
+	// 18:27 → 18:30 = 180 seconds = ~18 sleep calls at 10s/each.
+	if sleepCalls < 15 || sleepCalls > 20 {
+		t.Fatalf("sleep called %d times; expected ~18 (3 min / 10s)", sleepCalls)
+	}
+}
+
+func TestWaitForReleaseWindow_InsideWindow_ProceedsImmediately(t *testing.T) {
+	cfg := defaultAutoBookConfig()
+	loc := mustLocation(t, autoBookTimezone)
+	// 18:31:42: already inside the window.
+	clock := time.Date(2026, 6, 1, 18, 31, 42, 0, loc)
+	sleepCalls := 0
+	sleep := func(d time.Duration) { sleepCalls++; clock = clock.Add(d) }
+	nowFn := func() time.Time { return clock }
+
+	_, decision := waitForReleaseWindow(clock, cfg, loc, sleep, nowFn, autoBookAudit{})
+	if decision != waitDecisionProceed {
+		t.Fatalf("decision = %v, want waitDecisionProceed", decision)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("inside-window run should not sleep; got %d calls", sleepCalls)
+	}
+}
+
+func TestWaitForReleaseWindow_AfterWindow_Skips(t *testing.T) {
+	cfg := defaultAutoBookConfig()
+	loc := mustLocation(t, autoBookTimezone)
+	// 19:00: past the window end (18:35).
+	clock := time.Date(2026, 6, 1, 19, 0, 0, 0, loc)
+	sleep := func(d time.Duration) { t.Fatalf("should not sleep when past window; sleep(%s) called", d) }
+	nowFn := func() time.Time { return clock }
+
+	_, decision := waitForReleaseWindow(clock, cfg, loc, sleep, nowFn, autoBookAudit{})
+	if decision != waitDecisionSkip {
+		t.Fatalf("decision = %v, want waitDecisionSkip", decision)
+	}
+}
+
 func mustLocation(t *testing.T, name string) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation(name)
