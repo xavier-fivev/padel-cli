@@ -56,7 +56,7 @@ func TestFilterAutoBookCandidatesStartWindowInclusive(t *testing.T) {
 		{Court: "Court 2", Time: "20:00", Duration: 90},
 		{Court: "Court 2", Time: "20:30", Duration: 90},
 	}
-	got := filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil)
+	got := filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil, time.Time{})
 	if len(got) != 2 {
 		t.Fatalf("eligible slots = %d, want 2: %#v", len(got), got)
 	}
@@ -72,7 +72,7 @@ func TestFilterAutoBookCandidatesRequiresNinetyMinutes(t *testing.T) {
 		{Court: "Court 1", Time: "18:30", Duration: 60},
 		{Court: "Court 2", Time: "19:00", Duration: 90},
 	}
-	got := filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil)
+	got := filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil, time.Time{})
 	if len(got) != 1 {
 		t.Fatalf("eligible slots = %d, want 1: %#v", len(got), got)
 	}
@@ -216,6 +216,184 @@ polling:
 	}
 	if cfg.Payment.Method != "MERCHANT_WALLET" {
 		t.Fatalf("payment method = %q, want MERCHANT_WALLET", cfg.Payment.Method)
+	}
+}
+
+func TestLoadAutoBookConfigWeekendProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.weekend.yaml")
+	config := `mode: weekend
+dry_run: true
+timezone: Australia/Sydney
+venue:
+  id: "tenant_123"
+  name_exact: "Indoor Padel Australia Alexandria"
+release:
+  days_in_advance: 14
+  time: "18:30"
+  retry_until: "18:35"
+booking:
+  allowed_weekdays: [Saturday, Sunday]
+  allowed_durations: [90, 120]
+  start_window:
+    from: "10:00"
+    to: "18:00"
+  max_bookings_per_week: 3
+  max_bookings_per_day: 1
+  players: 4
+payment:
+  method: "MERCHANT_WALLET"
+calendar:
+  ical_url: ""
+notifications:
+  telegram:
+    enabled: false
+  whatsapp:
+    enabled: false
+polling:
+  min_interval_seconds: 15
+  max_interval_seconds: 30
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAutoBookConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "weekend" {
+		t.Fatalf("mode = %q, want weekend", cfg.Mode)
+	}
+	if cfg.Booking.StartWindow.From != "10:00" || cfg.Booking.StartWindow.To != "18:00" {
+		t.Fatalf("start window = %s-%s, want 10:00-18:00", cfg.Booking.StartWindow.From, cfg.Booking.StartWindow.To)
+	}
+	if len(cfg.Booking.AllowedDurations) != 2 || cfg.Booking.AllowedDurations[0] != 90 || cfg.Booking.AllowedDurations[1] != 120 {
+		t.Fatalf("allowed durations = %v, want [90 120]", cfg.Booking.AllowedDurations)
+	}
+	wantDays := map[time.Weekday]bool{time.Saturday: true, time.Sunday: true}
+	if len(cfg.Booking.AllowedWeekdays) != 2 {
+		t.Fatalf("weekdays = %v, want [Sat Sun]", cfg.Booking.AllowedWeekdays)
+	}
+	for _, weekday := range cfg.Booking.AllowedWeekdays {
+		if !wantDays[weekday] {
+			t.Fatalf("unexpected weekday %s in weekend profile", weekday)
+		}
+	}
+}
+
+func TestWeekendProfileRejectsWeekdayValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.yaml")
+	config := `mode: weekend
+dry_run: true
+timezone: Australia/Sydney
+venue:
+  id: "tenant_123"
+  name_exact: "Indoor Padel Australia Alexandria"
+release:
+  days_in_advance: 14
+  time: "18:30"
+  retry_until: "18:35"
+booking:
+  allowed_weekdays: [Monday]
+  allowed_durations: [90]
+  start_window:
+    from: "10:00"
+    to: "18:00"
+  max_bookings_per_week: 3
+  max_bookings_per_day: 1
+  players: 4
+payment:
+  method: "MERCHANT_WALLET"
+polling:
+  min_interval_seconds: 15
+  max_interval_seconds: 30
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAutoBookConfig(path); err == nil {
+		t.Fatal("expected validation error for Monday in weekend profile")
+	}
+}
+
+func TestWeekdayProfileRejectsTwoHourDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.yaml")
+	config := `mode: weekday
+dry_run: true
+timezone: Australia/Sydney
+venue:
+  id: "tenant_123"
+  name_exact: "Indoor Padel Australia Alexandria"
+release:
+  days_in_advance: 14
+  time: "18:30"
+  retry_until: "18:35"
+booking:
+  allowed_weekdays: [Monday]
+  allowed_durations: [90, 120]
+  start_window:
+    from: "18:30"
+    to: "20:00"
+  max_bookings_per_week: 2
+  max_bookings_per_day: 1
+  players: 4
+payment:
+  method: "MERCHANT_WALLET"
+polling:
+  min_interval_seconds: 15
+  max_interval_seconds: 30
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAutoBookConfig(path); err == nil {
+		t.Fatal("expected validation error for 120 min in weekday profile")
+	}
+}
+
+func TestFilterAutoBookCandidatesPrefers90Over120(t *testing.T) {
+	cfg := defaultAutoBookConfig()
+	cfg.Mode = "weekend"
+	cfg.Booking.AllowedWeekdays = []time.Weekday{time.Saturday, time.Sunday}
+	cfg.Booking.AllowedDurations = []int{90, 120}
+	cfg.Booking.StartWindow.From = "10:00"
+	cfg.Booking.StartWindow.To = "18:00"
+	loc := mustLocation(t, autoBookTimezone)
+	slots := []AvailabilitySlot{
+		{Court: "Court 1", Time: "12:00", Duration: 120},
+		{Court: "Court 2", Time: "12:00", Duration: 90},
+		{Court: "Court 3", Time: "14:00", Duration: 60}, // not in allowed
+		{Court: "Court 4", Time: "09:00", Duration: 90}, // before window
+	}
+	got := filterAutoBookCandidates(slots, cfg, "2026-06-06", loc, nil, time.Time{})
+	if len(got) != 2 {
+		t.Fatalf("eligible slots = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].Duration != 90 {
+		t.Fatalf("first candidate duration = %d, want 90 (preference)", got[0].Duration)
+	}
+	if got[1].Duration != 120 {
+		t.Fatalf("second candidate duration = %d, want 120", got[1].Duration)
+	}
+}
+
+func TestFilterAutoBookCandidatesEnforces72HourLeadTime(t *testing.T) {
+	cfg := defaultAutoBookConfig()
+	loc := mustLocation(t, autoBookTimezone)
+	// targetDate is 2026-06-03 18:30; if "now" is only 24h before, the slot
+	// is inside the 72h hard floor and must be rejected.
+	now := time.Date(2026, 6, 2, 18, 30, 0, 0, loc)
+	slots := []AvailabilitySlot{
+		{Court: "Court 1", Time: "18:30", Duration: 90}, // ~24h out — should be rejected
+	}
+	got := filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil, now)
+	if len(got) != 0 {
+		t.Fatalf("expected 0 candidates inside the 72h floor, got %d", len(got))
+	}
+	// Same slot, 14 days out — the normal auto-book path. Should be accepted.
+	now = time.Date(2026, 5, 20, 18, 30, 0, 0, loc)
+	got = filterAutoBookCandidates(slots, cfg, "2026-06-03", loc, nil, now)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 candidate at the 14-day mark, got %d", len(got))
 	}
 }
 

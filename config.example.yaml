@@ -1,6 +1,12 @@
 # Default is safe: this will never create a booking.
 dry_run: true
 
+# Pick the profile. Each mode has its own locked weekday set, duration list,
+# and start window. The validator refuses to widen beyond those bounds.
+#   weekday: Mon-Thu, 90 min, 18:30-20:00 start window
+#   weekend: Sat-Sun, 90 or 120 min (prefers 90), 10:00-18:00 start window
+mode: weekday
+
 # The automation is intentionally locked to Australia/Sydney.
 timezone: Australia/Sydney
 
@@ -18,11 +24,13 @@ release:
 
 booking:
   allowed_weekdays: [Monday, Tuesday, Wednesday, Thursday]
-  duration_minutes: 90
+  # First entry is preferred. For the weekday profile only [90] is allowed.
+  allowed_durations: [90]
   start_window:
     from: "18:30"
     to: "20:00"
-  max_bookings_per_week: 2
+  # Shared cap across modes: total confirmed bookings per week / day.
+  max_bookings_per_week: 3
   max_bookings_per_day: 1
   players: 4
 

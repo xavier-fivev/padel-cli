@@ -14,14 +14,37 @@ const (
 	autoBookReleaseTime   = "18:30"
 	autoBookRetryUntil    = "18:35"
 	autoBookDaysInAdvance = 14
-	autoBookDuration      = 90
-	autoBookWindowStart   = "18:30"
-	autoBookWindowEnd     = "20:00"
-	autoBookWeeklyCap     = 2
+	autoBookWeeklyCap     = 3
 	autoBookDailyCap      = 1
 )
 
+type autoBookProfile struct {
+	Name             string
+	AllowedWeekdays  []time.Weekday
+	AllowedDurations []int
+	StartWindowFrom  string
+	StartWindowTo    string
+}
+
+var autoBookProfiles = map[string]autoBookProfile{
+	"weekday": {
+		Name:             "weekday",
+		AllowedWeekdays:  []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday},
+		AllowedDurations: []int{90},
+		StartWindowFrom:  "18:30",
+		StartWindowTo:    "20:00",
+	},
+	"weekend": {
+		Name:             "weekend",
+		AllowedWeekdays:  []time.Weekday{time.Saturday, time.Sunday},
+		AllowedDurations: []int{90, 120},
+		StartWindowFrom:  "10:00",
+		StartWindowTo:    "18:00",
+	},
+}
+
 type AutoBookConfig struct {
+	Mode          string
 	DryRun        bool
 	Timezone      string
 	Venue         AutoBookVenueConfig
@@ -46,7 +69,7 @@ type AutoBookReleaseConfig struct {
 
 type AutoBookBookingConfig struct {
 	AllowedWeekdays    []time.Weekday
-	DurationMinutes    int
+	AllowedDurations   []int
 	StartWindow        AutoBookStartWindowConfig
 	MaxBookingsPerWeek int
 	MaxBookingsPerDay  int
@@ -87,7 +110,9 @@ type AutoBookPollingConfig struct {
 }
 
 func defaultAutoBookConfig() AutoBookConfig {
+	profile := autoBookProfiles["weekday"]
 	return AutoBookConfig{
+		Mode:     profile.Name,
 		DryRun:   true,
 		Timezone: autoBookTimezone,
 		Venue: AutoBookVenueConfig{
@@ -99,11 +124,11 @@ func defaultAutoBookConfig() AutoBookConfig {
 			RetryUntil:    autoBookRetryUntil,
 		},
 		Booking: AutoBookBookingConfig{
-			AllowedWeekdays: []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday},
-			DurationMinutes: autoBookDuration,
+			AllowedWeekdays:  append([]time.Weekday(nil), profile.AllowedWeekdays...),
+			AllowedDurations: append([]int(nil), profile.AllowedDurations...),
 			StartWindow: AutoBookStartWindowConfig{
-				From: autoBookWindowStart,
-				To:   autoBookWindowEnd,
+				From: profile.StartWindowFrom,
+				To:   profile.StartWindowTo,
 			},
 			MaxBookingsPerWeek: autoBookWeeklyCap,
 			MaxBookingsPerDay:  autoBookDailyCap,
@@ -136,6 +161,11 @@ func loadAutoBookConfig(path string) (AutoBookConfig, error) {
 	}
 
 	cfg := defaultAutoBookConfig()
+	sawMode := false
+	sawDurationMinutes := false
+	sawAllowedDurations := false
+	sawAllowedWeekdays := false
+	sawStartWindow := false
 	sections := map[int]string{}
 	lines := strings.Split(string(data), "\n")
 	for i, raw := range lines {
@@ -179,9 +209,43 @@ func loadAutoBookConfig(path string) (AutoBookConfig, error) {
 		}
 
 		pathParts = append(pathParts, key)
+		joinedKey := strings.Join(pathParts, ".")
+		switch joinedKey {
+		case "mode":
+			sawMode = true
+		case "booking.duration_minutes":
+			sawDurationMinutes = true
+		case "booking.allowed_durations":
+			sawAllowedDurations = true
+		case "booking.allowed_weekdays":
+			sawAllowedWeekdays = true
+		case "booking.start_window.from", "booking.start_window.to":
+			sawStartWindow = true
+		}
+
 		if err := setAutoBookConfigValue(&cfg, pathParts, parseYAMLScalar(value)); err != nil {
 			return AutoBookConfig{}, fmt.Errorf("%s:%d: %w", path, i+1, err)
 		}
+	}
+
+	// Apply profile defaults for any fields the user didn't override. The
+	// validator below still rejects values that go beyond the profile.
+	profile, ok := autoBookProfiles[strings.ToLower(strings.TrimSpace(cfg.Mode))]
+	if !ok {
+		return AutoBookConfig{}, fmt.Errorf("unknown mode %q (must be one of: weekday, weekend)", cfg.Mode)
+	}
+	if !sawAllowedWeekdays {
+		cfg.Booking.AllowedWeekdays = append([]time.Weekday(nil), profile.AllowedWeekdays...)
+	}
+	if !sawAllowedDurations && !sawDurationMinutes {
+		cfg.Booking.AllowedDurations = append([]int(nil), profile.AllowedDurations...)
+	}
+	if !sawStartWindow {
+		cfg.Booking.StartWindow.From = profile.StartWindowFrom
+		cfg.Booking.StartWindow.To = profile.StartWindowTo
+	}
+	if !sawMode {
+		cfg.Mode = profile.Name
 	}
 
 	if err := validateAutoBookConfig(cfg); err != nil {
@@ -267,6 +331,8 @@ func unquoteYAML(input string) string {
 func setAutoBookConfigValue(cfg *AutoBookConfig, path []string, value any) error {
 	key := strings.Join(path, ".")
 	switch key {
+	case "mode":
+		cfg.Mode = strings.ToLower(stringValue(value))
 	case "dry_run":
 		v, ok := value.(bool)
 		if !ok {
@@ -292,7 +358,14 @@ func setAutoBookConfigValue(cfg *AutoBookConfig, path []string, value any) error
 		}
 		cfg.Booking.AllowedWeekdays = weekdays
 	case "booking.duration_minutes":
-		cfg.Booking.DurationMinutes = intValue(value)
+		// Back-compat with the original singular field — treated as a single-element allowed list.
+		cfg.Booking.AllowedDurations = []int{intValue(value)}
+	case "booking.allowed_durations":
+		durations, err := intListValue(value)
+		if err != nil {
+			return err
+		}
+		cfg.Booking.AllowedDurations = durations
 	case "booking.start_window.from":
 		cfg.Booking.StartWindow.From = stringValue(value)
 	case "booking.start_window.to":
@@ -361,6 +434,31 @@ func intValue(value any) int {
 	}
 }
 
+func intListValue(value any) ([]int, error) {
+	var raw []string
+	switch v := value.(type) {
+	case []string:
+		raw = v
+	case string:
+		for _, part := range strings.Split(v, ",") {
+			raw = append(raw, strings.TrimSpace(part))
+		}
+	case int:
+		return []int{v}, nil
+	default:
+		return nil, fmt.Errorf("expected list of integers")
+	}
+	out := make([]int, 0, len(raw))
+	for _, entry := range raw {
+		n, err := strconv.Atoi(strings.TrimSpace(entry))
+		if err != nil {
+			return nil, fmt.Errorf("invalid integer %q", entry)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
 func weekdayValues(value any) ([]time.Weekday, error) {
 	var labels []string
 	switch v := value.(type) {
@@ -407,6 +505,10 @@ func parseWeekday(input string) (time.Weekday, bool) {
 }
 
 func validateAutoBookConfig(cfg AutoBookConfig) error {
+	profile, ok := autoBookProfiles[strings.ToLower(strings.TrimSpace(cfg.Mode))]
+	if !ok {
+		return fmt.Errorf("mode must be one of: weekday, weekend (got %q)", cfg.Mode)
+	}
 	if cfg.Timezone != autoBookTimezone {
 		return fmt.Errorf("timezone must be %s", autoBookTimezone)
 	}
@@ -428,14 +530,19 @@ func validateAutoBookConfig(cfg AutoBookConfig) error {
 	if cfg.Release.RetryUntil != autoBookRetryUntil {
 		return fmt.Errorf("release.retry_until must be %s", autoBookRetryUntil)
 	}
-	if cfg.Booking.DurationMinutes != autoBookDuration {
-		return fmt.Errorf("booking.duration_minutes must be %d", autoBookDuration)
+	if len(cfg.Booking.AllowedDurations) == 0 {
+		return fmt.Errorf("booking.allowed_durations must not be empty")
+	}
+	for _, duration := range cfg.Booking.AllowedDurations {
+		if !containsInt(profile.AllowedDurations, duration) {
+			return fmt.Errorf("booking.allowed_durations may only include values from %v for mode %s", profile.AllowedDurations, profile.Name)
+		}
 	}
 	if cfg.Booking.Players <= 0 {
 		return fmt.Errorf("booking.players must be greater than 0")
 	}
-	if cfg.Booking.StartWindow.From != autoBookWindowStart || cfg.Booking.StartWindow.To != autoBookWindowEnd {
-		return fmt.Errorf("booking.start_window must be %s to %s", autoBookWindowStart, autoBookWindowEnd)
+	if cfg.Booking.StartWindow.From != profile.StartWindowFrom || cfg.Booking.StartWindow.To != profile.StartWindowTo {
+		return fmt.Errorf("booking.start_window must be %s to %s for mode %s", profile.StartWindowFrom, profile.StartWindowTo, profile.Name)
 	}
 	if cfg.Booking.MaxBookingsPerWeek <= 0 || cfg.Booking.MaxBookingsPerWeek > autoBookWeeklyCap {
 		return fmt.Errorf("booking.max_bookings_per_week must be between 1 and %d", autoBookWeeklyCap)
@@ -447,8 +554,8 @@ func validateAutoBookConfig(cfg AutoBookConfig) error {
 		return fmt.Errorf("booking.allowed_weekdays must not be empty")
 	}
 	for _, weekday := range cfg.Booking.AllowedWeekdays {
-		if weekday < time.Monday || weekday > time.Thursday {
-			return fmt.Errorf("booking.allowed_weekdays may only include Monday through Thursday")
+		if !weekdayInProfile(weekday, profile.AllowedWeekdays) {
+			return fmt.Errorf("booking.allowed_weekdays may only include %s for mode %s", weekdayNames(profile.AllowedWeekdays), profile.Name)
 		}
 	}
 	if cfg.Payment.Method == "" {
@@ -467,6 +574,41 @@ func validateAutoBookConfig(cfg AutoBookConfig) error {
 		return fmt.Errorf("polling.max_interval_seconds must be greater than or equal to min_interval_seconds")
 	}
 	return nil
+}
+
+func weekdayInProfile(weekday time.Weekday, allowed []time.Weekday) bool {
+	for _, candidate := range allowed {
+		if candidate == weekday {
+			return true
+		}
+	}
+	return false
+}
+
+func weekdayNames(weekdays []time.Weekday) string {
+	parts := make([]string, 0, len(weekdays))
+	for _, weekday := range weekdays {
+		parts = append(parts, weekday.String())
+	}
+	return strings.Join(parts, ", ")
+}
+
+func containsInt(haystack []int, needle int) bool {
+	for _, entry := range haystack {
+		if entry == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func indexOfInt(haystack []int, needle int) int {
+	for i, entry := range haystack {
+		if entry == needle {
+			return i
+		}
+	}
+	return -1
 }
 
 func normalizeAutoBookVenueName(input string) string {

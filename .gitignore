@@ -2,6 +2,10 @@
 auth.toml
 credentials.json
 
+# Local auto-book config (contains tenant id; user-specific)
+config.yaml
+config.weekend.yaml
+
 # Build artifacts
 /padel
 *.exe

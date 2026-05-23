@@ -142,7 +142,7 @@ func runAutoBook(ctx context.Context, cfg AutoBookConfig, opts autoBookRunOption
 	attempt := 0
 	for {
 		attempt++
-		candidate, candidates, err := findAutoBookCandidate(ctx, cfg, tenant, venueTZ, resources, targetDate, calendarEvents)
+		candidate, candidates, err := findAutoBookCandidate(ctx, cfg, tenant, venueTZ, resources, targetDate, calendarEvents, opts.Now().In(loc))
 		if err != nil {
 			return stopAndNotify(ctx, notifier, audit, "availability_failed", "Auto-book stopped: availability lookup failed", err)
 		}
@@ -152,13 +152,17 @@ func runAutoBook(ctx context.Context, cfg AutoBookConfig, opts autoBookRunOption
 
 		if candidate != nil {
 			slot := *candidate
-			audit.log("info", "candidate_selected", fmt.Sprintf("selected %s on %s", slot.Time, slot.Court), slot.Time, map[string]any{
+			audit.log("info", "candidate_selected", fmt.Sprintf("selected %s %dmin on %s", slot.Time, slot.Duration, slot.Court), slot.Time, map[string]any{
 				"court":       slot.Court,
 				"resource_id": slot.ResourceID,
+				"duration":    slot.Duration,
 				"price":       slot.Price,
 			})
+			slotStart, _, _ := availabilitySlotInterval(slot, targetDateStr, loc, slot.Duration)
+			cancelDeadline := slotStart.Add(-autoBookFreeCancelMargin)
+			cancelDeadlineLabel := cancelDeadline.Format("Mon 2 Jan 15:04 MST")
 			executed, err := executeUnlessDryRun(ctx, cfg.DryRun, func(ctx context.Context) error {
-				audit.log("info", "booking_attempt_started", fmt.Sprintf("booking %s %s", targetDateStr, slot.Time), slot.Time, nil)
+				audit.log("info", "booking_attempt_started", fmt.Sprintf("booking %s %s %dmin", targetDateStr, slot.Time, slot.Duration), slot.Time, nil)
 				booking, err := executeAutoBookBooking(ctx, cfg, creds, tenant, slot, targetDateStr, venueTZ)
 				if err != nil {
 					return err
@@ -166,18 +170,22 @@ func runAutoBook(ctx context.Context, cfg AutoBookConfig, opts autoBookRunOption
 				if _, err := storage.AddBookingIfNotExists(db, booking); err != nil {
 					return fmt.Errorf("store confirmed booking: %w", err)
 				}
-				audit.log("info", "booking_confirmed", fmt.Sprintf("booked %s %s on %s", tenant.TenantName, slot.Time, targetDateStr), slot.Time, map[string]any{
-					"booking_id": booking.ID,
+				audit.log("info", "booking_confirmed", fmt.Sprintf("booked %s %s on %s; free-cancel until %s", tenant.TenantName, slot.Time, targetDateStr, cancelDeadlineLabel), slot.Time, map[string]any{
+					"booking_id":             booking.ID,
+					"cancel_deadline_local":  cancelDeadlineLabel,
+					"cancel_deadline_utc":    cancelDeadline.UTC().Format(time.RFC3339),
 				})
-				notifyBestEffort(ctx, notifier, audit, fmt.Sprintf("Padel booked: %s %s at %s (%s, %d min)", targetDateStr, slot.Time, tenant.TenantName, slot.Court, cfg.Booking.DurationMinutes))
+				notifyBestEffort(ctx, notifier, audit, fmt.Sprintf("Padel booked: %s %s at %s (%s, %d min). Free-cancel until %s — match stays private; invite players or cancel before then.", targetDateStr, slot.Time, tenant.TenantName, slot.Court, slot.Duration, cancelDeadlineLabel))
 				return nil
 			})
 			if err != nil {
 				return stopAndNotify(ctx, notifier, audit, "booking_failed", "Auto-book stopped: checkout did not complete safely", err)
 			}
 			if !executed {
-				audit.log("info", "dry_run_booking_prevented", fmt.Sprintf("dry-run would book %s %s on %s", tenant.TenantName, slot.Time, targetDateStr), slot.Time, nil)
-				notifyBestEffort(ctx, notifier, audit, fmt.Sprintf("Padel dry-run: would book %s %s at %s (%s, %d min)", targetDateStr, slot.Time, tenant.TenantName, slot.Court, cfg.Booking.DurationMinutes))
+				audit.log("info", "dry_run_booking_prevented", fmt.Sprintf("dry-run would book %s %s on %s; free-cancel would be until %s", tenant.TenantName, slot.Time, targetDateStr, cancelDeadlineLabel), slot.Time, map[string]any{
+					"cancel_deadline_local": cancelDeadlineLabel,
+				})
+				notifyBestEffort(ctx, notifier, audit, fmt.Sprintf("Padel dry-run: would book %s %s at %s (%s, %d min). Cancel deadline would be %s.", targetDateStr, slot.Time, tenant.TenantName, slot.Court, slot.Duration, cancelDeadlineLabel))
 			}
 			return nil
 		}
@@ -452,7 +460,17 @@ func countBookingsInDateRange(bookings []storage.Booking, start, end time.Time) 
 	return count
 }
 
-func findAutoBookCandidate(ctx context.Context, cfg AutoBookConfig, tenant api.Tenant, venueTZ string, resources []api.Resource, targetDate time.Time, calendarEvents []CalendarEvent) (*AvailabilitySlot, []AvailabilitySlot, error) {
+// autoBookFreeCancelMargin is how long before play the free-cancel window
+// closes on a private match. Playtomic policy at this venue is 48h.
+const autoBookFreeCancelMargin = 48 * time.Hour
+
+// minAutoBookLeadTime is a hard safety bound. We require 72h between now and
+// the slot so there's always a clean 24h of margin above the free-cancel
+// deadline. Today+14 (autoBookDaysInAdvance) is always well above this, but
+// this check defends against future config drift.
+const minAutoBookLeadTime = 72 * time.Hour
+
+func findAutoBookCandidate(ctx context.Context, cfg AutoBookConfig, tenant api.Tenant, venueTZ string, resources []api.Resource, targetDate time.Time, calendarEvents []CalendarEvent, now time.Time) (*AvailabilitySlot, []AvailabilitySlot, error) {
 	loc := venueLocation(venueTZ)
 	startLocal := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 0, 0, 0, 0, loc)
 	endLocal := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 23, 59, 59, 0, loc)
@@ -475,19 +493,19 @@ func findAutoBookCandidate(ctx context.Context, cfg AutoBookConfig, tenant api.T
 	endMinutes, _ := parseClock(cfg.Booking.StartWindow.To)
 	targetDateStr := targetDate.Format("2006-01-02")
 	slots := filterAvailabilityWithResources(availability, resourceInfo, startMinutes, endMinutes, true, targetDateStr, venueTZ, false, false)
-	candidates := filterAutoBookCandidates(slots, cfg, targetDateStr, loc, calendarEvents)
+	candidates := filterAutoBookCandidates(slots, cfg, targetDateStr, loc, calendarEvents, now)
 	if len(candidates) == 0 {
 		return nil, candidates, nil
 	}
 	return &candidates[0], candidates, nil
 }
 
-func filterAutoBookCandidates(slots []AvailabilitySlot, cfg AutoBookConfig, targetDate string, loc *time.Location, calendarEvents []CalendarEvent) []AvailabilitySlot {
+func filterAutoBookCandidates(slots []AvailabilitySlot, cfg AutoBookConfig, targetDate string, loc *time.Location, calendarEvents []CalendarEvent, now time.Time) []AvailabilitySlot {
 	startMinutes, _ := parseClock(cfg.Booking.StartWindow.From)
 	endMinutes, _ := parseClock(cfg.Booking.StartWindow.To)
 	candidates := []AvailabilitySlot{}
 	for _, slot := range slots {
-		if slot.Duration != cfg.Booking.DurationMinutes {
+		if !containsInt(cfg.Booking.AllowedDurations, slot.Duration) {
 			continue
 		}
 		minutes, err := parseClock(slot.Time)
@@ -497,8 +515,13 @@ func filterAutoBookCandidates(slots []AvailabilitySlot, cfg AutoBookConfig, targ
 		if minutes < startMinutes || minutes > endMinutes {
 			continue
 		}
-		start, end, err := availabilitySlotInterval(slot, targetDate, loc, cfg.Booking.DurationMinutes)
+		start, end, err := availabilitySlotInterval(slot, targetDate, loc, slot.Duration)
 		if err != nil {
+			continue
+		}
+		if start.Sub(now) < minAutoBookLeadTime {
+			// Bookings must be at least 72h out so we always have a clean
+			// 24h margin above the 48h free-cancel deadline.
 			continue
 		}
 		if calendarHasConflict(calendarEvents, start, end) {
@@ -507,6 +530,13 @@ func filterAutoBookCandidates(slots []AvailabilitySlot, cfg AutoBookConfig, targ
 		candidates = append(candidates, slot)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		// Prefer durations earlier in the allowed list (e.g. 90 before 120),
+		// then earliest start time, then court name for stability.
+		leftDurIdx := indexOfInt(cfg.Booking.AllowedDurations, candidates[i].Duration)
+		rightDurIdx := indexOfInt(cfg.Booking.AllowedDurations, candidates[j].Duration)
+		if leftDurIdx != rightDurIdx {
+			return leftDurIdx < rightDurIdx
+		}
 		left, _ := parseClock(candidates[i].Time)
 		right, _ := parseClock(candidates[j].Time)
 		if left == right {
@@ -541,7 +571,7 @@ func executeUnlessDryRun(ctx context.Context, dryRun bool, exec func(context.Con
 
 func executeAutoBookBooking(ctx context.Context, cfg AutoBookConfig, creds *storage.Credentials, tenant api.Tenant, slot AvailabilitySlot, targetDateStr, venueTZ string) (storage.Booking, error) {
 	loc := venueLocation(venueTZ)
-	start, _, err := availabilitySlotInterval(slot, targetDateStr, loc, cfg.Booking.DurationMinutes)
+	start, _, err := availabilitySlotInterval(slot, targetDateStr, loc, slot.Duration)
 	if err != nil {
 		return storage.Booking{}, err
 	}
@@ -560,7 +590,7 @@ func executeAutoBookBooking(ctx context.Context, cfg AutoBookConfig, creds *stor
 					TenantID:             tenant.TenantID,
 					ResourceID:           slot.ResourceID,
 					Start:                startUTC.Format("2006-01-02T15:04:05"),
-					Duration:             cfg.Booking.DurationMinutes,
+					Duration:             slot.Duration,
 					MatchRegistrations: []api.MatchRegistration{
 						{UserID: creds.UserID, PayNow: true},
 					},
@@ -605,7 +635,7 @@ func executeAutoBookBooking(ctx context.Context, cfg AutoBookConfig, creds *stor
 		Time:          slot.Time,
 		StartUTC:      startUTC.Format(time.RFC3339),
 		VenueTimezone: venueTZ,
-		Duration:      cfg.Booking.DurationMinutes,
+		Duration:      slot.Duration,
 		Price:         parsePriceAmount(slot.Price),
 		BookedAt:      time.Now().UTC().Format(time.RFC3339),
 		Source:        "auto_booked",

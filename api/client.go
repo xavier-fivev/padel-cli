@@ -20,6 +20,13 @@ const (
 	defaultRequestedWith = "com.playtomic.web"
 )
 
+// Doctrine: the auto-book strategy is private-only. A match must never be
+// published to Playtomic's open feed via this client, because publishing
+// forfeits the 48h free-cancel window. The matches-publish endpoint exists
+// on Playtomic's side but no method should be added here that hits it.
+// Enforced by forbidden_test.go (it scans every .go file for the literal
+// path fragments).
+
 type Client struct {
 	HTTP          *http.Client
 	PublicBaseURL string
