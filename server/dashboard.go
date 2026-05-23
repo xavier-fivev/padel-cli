@@ -21,6 +21,7 @@ type dashboardData struct {
 	Active string
 	Rows   []dashboardRow
 	Now    time.Time
+	Wallet walletStatus
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +62,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Active: "dashboard",
 		Rows:   rows,
 		Now:    now,
+		Wallet: s.cachedWalletStatus(),
 	})
 }
 

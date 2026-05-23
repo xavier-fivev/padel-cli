@@ -1,4 +1,29 @@
+{{define "wallet_fragment"}}
+<div id="wallet-status" style="background: var(--panel); border-radius: 6px; padding: 14px 18px; margin-bottom: 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+  {{if .Balance}}
+    <div>
+      <div style="color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;">{{if .WalletName}}{{.WalletName}}{{else}}Wallet{{end}}</div>
+      <div style="font-size: 22px; font-weight: 600;">{{.Balance}} <span style="color: var(--muted); font-size: 14px; font-weight: 400;">{{.Currency}}</span></div>
+    </div>
+    <div style="color: var(--muted); font-size: 12px;">
+      checked {{.LastChecked.Format "Mon 2 Jan 15:04"}}
+      {{if .Stale}}<span class="badge badge-amber" style="margin-left: 6px;">stale</span>{{end}}
+    </div>
+  {{else if .LastError}}
+    <div style="color: var(--red);">{{.LastError}}</div>
+  {{else}}
+    <div style="color: var(--muted);">Wallet balance not fetched yet.</div>
+  {{end}}
+  <span style="flex: 1;"></span>
+  <button hx-post="/wallet/refresh" hx-target="#wallet-status" hx-swap="outerHTML" hx-indicator="#wallet-spinner" class="secondary">Refresh balance</button>
+  <span id="wallet-spinner" class="htmx-indicator" style="color: var(--muted); font-size: 12px;">probing…</span>
+</div>
+<style>.htmx-indicator { display: none; } .htmx-request .htmx-indicator { display: inline; } .htmx-request.htmx-indicator { display: inline; }</style>
+{{end}}
+
 {{define "content"}}
+{{template "wallet_fragment" .Wallet}}
+
 <div class="row">
   <h2 style="margin: 0; flex: 1;">Upcoming bookings</h2>
   <span style="color: var(--muted); font-size: 12px;" hx-get="/" hx-trigger="every 30s" hx-target="body" hx-swap="outerHTML">auto-refresh 30s · {{.Now.Format "15:04:05 MST"}}</span>

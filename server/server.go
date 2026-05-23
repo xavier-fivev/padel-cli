@@ -26,11 +26,12 @@ type Server struct {
 	BinaryPath string
 	ConfigDir string
 
-	mu         sync.Mutex
-	templates  map[string]*template.Template
-	db         *sql.DB
-	logger     *log.Logger
-	currentRun *runProcess
+	mu           sync.Mutex
+	templates    map[string]*template.Template
+	db           *sql.DB
+	logger       *log.Logger
+	currentRun   *runProcess
+	walletStatus walletStatus
 }
 
 func New(bind string, port int, binaryPath, configDir string, logger *log.Logger) (*Server, error) {
@@ -99,6 +100,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/run", s.handleRunPage)
 	mux.HandleFunc("/run/start", s.handleRunStart)
 	mux.HandleFunc("/run/stream", s.handleRunStream)
+	mux.HandleFunc("/wallet/refresh", s.handleWalletRefresh)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
